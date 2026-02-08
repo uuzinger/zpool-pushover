@@ -1,38 +1,46 @@
-````markdown
-# Zpool Monitor (cron + Pushover) — README
+# Zpool Monitor (cron + Pushover)
 
-This project provides a lightweight ZFS `zpool` monitoring script designed to run from `cron`. It:
-- Logs pool health and scan activity (scrub/resilver) every run
+A lightweight ZFS `zpool` monitoring script designed to run from `cron`.
+
+It:
+
+- Logs pool health and scan activity (scrub / resilver) every run
 - Sends Pushover notifications when a pool becomes unhealthy (rate-limited)
-- Optionally sends exactly one notification when a scrub starts and exactly one when it ends (configurable)
+- Optionally sends **exactly one** notification when a scrub starts and **exactly one** when it ends (fully configurable)
+
+---
 
 ## Files
 
-- `zpool-monitor.sh`  
-  The main monitoring script. Intended to be run periodically via `cron`.
+- **`zpool-monitor.sh`**  
+  Main monitoring script. Intended to be run periodically via `cron`.
 
-- `/etc/zpool-monitor.env`  
-  Environment configuration file (recommended). Stores pool name, Pushover credentials, log/state paths, and notification toggles.
+- **`/etc/zpool-monitor.env`**  
+  Environment configuration file. Stores pool name, Pushover credentials, logging paths, and notification toggles.
 
-- State directory (default: `/var/lib/poolStatusCheck/`)  
-  The script writes a few small files here to remember prior state (so it can detect “scrub started” and “scrub ended” transitions and enforce cooldown).
+- **State directory** (default: `/var/lib/poolStatusCheck/`)  
+  Stores small state files so the script can detect transitions (scrub start/end) and enforce alert cooldowns.
+
+---
 
 ## Requirements
 
-- ZFS tools installed (`zpool` available, typically `/usr/sbin/zpool`)
-- `curl` installed for Pushover delivery
-- Permissions to run `zpool status` (usually run via root cron)
-- Optional but recommended: `flock` (from `util-linux`) to avoid overlapping cron runs
+- ZFS utilities installed (`zpool` available, typically `/usr/sbin/zpool`)
+- `curl` installed (for Pushover delivery)
+- Script should run as `root` (or a user with permission to run `zpool status`)
+- Optional but recommended: `flock` (from `util-linux`) to prevent overlapping cron runs
 
-## Install
+---
 
-1) Copy the script into place:
+## Installation
+
+### 1. Install the script
 
 ```bash
 sudo install -m 0755 zpool-monitor.sh /usr/local/sbin/zpool-monitor.sh
-````
+```
 
-2. Create the environment file:
+### 2. Create the environment file
 
 ```bash
 sudo nano /etc/zpool-monitor.env
@@ -42,25 +50,25 @@ sudo chmod 600 /etc/zpool-monitor.env
 Example `/etc/zpool-monitor.env`:
 
 ```bash
-# Which pool to monitor
+# Pool to monitor
 POOL="pool"
 
 # Logging / state
 LOGFILE="/var/log/poolStatusCheck.log"
 STATE_DIR="/var/lib/poolStatusCheck"
 
-# Cooldown for repeated "unhealthy" notifications (seconds)
+# Cooldown for repeated "unhealthy" alerts (seconds)
 COOLDOWN_SECONDS=3600
 
 # Pushover credentials
 PO_TOKEN="XXX"
 PO_UK="YYY"
 
-# Enable scrub start/end notifications (0/1)
+# Scrub notifications (0 = disabled, 1 = enabled)
 NOTIFY_SCRUB_START=1
 NOTIFY_SCRUB_END=1
 
-# Optional: enable resilver start/end notifications (0/1)
+# Optional resilver notifications
 NOTIFY_RESILVER_START=0
 NOTIFY_RESILVER_END=0
 
@@ -71,170 +79,152 @@ PO_SOUND_ALARM=""
 PO_SOUND_INFO=""
 ```
 
-3. Create the state directory (if you keep defaults):
+### 3. Create the state directory
 
 ```bash
 sudo mkdir -p /var/lib/poolStatusCheck
 sudo chmod 700 /var/lib/poolStatusCheck
 ```
 
-4. Ensure the log file is writable by the user running the script (root recommended):
+### 4. Create the log file
 
 ```bash
 sudo touch /var/log/poolStatusCheck.log
 sudo chmod 640 /var/log/poolStatusCheck.log
-sudo chown root:adm /var/log/poolStatusCheck.log 2>/dev/null || sudo chown root:root /var/log/poolStatusCheck.log
+sudo chown root:root /var/log/poolStatusCheck.log
 ```
 
-## Cron setup
+---
 
-Recommended cron entry (runs every 5 minutes, prevents overlapping runs):
+## Cron Setup
+
+Recommended cron entry (runs every 5 minutes and prevents overlapping runs):
 
 ```cron
 */5 * * * * /usr/bin/flock -n /var/run/zpool-monitor.lock ENV_FILE=/etc/zpool-monitor.env /usr/local/sbin/zpool-monitor.sh
 ```
 
-If you don’t want `flock`, use:
+If you don’t want locking:
 
 ```cron
 */5 * * * * ENV_FILE=/etc/zpool-monitor.env /usr/local/sbin/zpool-monitor.sh
 ```
 
-### Quick test (manual run)
+---
 
-Run once manually to confirm everything works:
+## Manual Test
+
+Run once by hand to verify everything works:
 
 ```bash
 sudo ENV_FILE=/etc/zpool-monitor.env /usr/local/sbin/zpool-monitor.sh
 ```
 
-Then check logs:
+Check logs:
 
 ```bash
 sudo tail -n 50 /var/log/poolStatusCheck.log
 ```
 
-If using systemd-journald, you can also check:
+If using systemd-journald:
 
 ```bash
 sudo journalctl -t zpool-monitor -n 50
 ```
 
-## What the script does
+---
 
-Every run, the script:
+## What the Script Does
 
-1. Runs `zpool status -x POOL` to determine whether the pool is healthy.
-2. Runs `zpool status POOL` and extracts:
+Every run:
 
-   * the `scan:` line (scrub/resilver info)
-   * an optional “% done” line (progress)
+1. Checks pool health using `zpool status -x POOL`
+2. Extracts scan activity from `zpool status POOL`
 3. Logs:
-
-   * `ACTIVITY: ...` lines for scrub/resilver/none
-   * `OK:` when healthy
-   * `ALARM:` when unhealthy
-4. Notifications:
-
-   * Unhealthy: sends a Pushover alert when the pool is not healthy, rate-limited by `COOLDOWN_SECONDS`.
-   * Scrub start: sends once when the script detects a transition into “scrub in progress” (if enabled).
-   * Scrub end: sends once when the script detects a transition out of scrub and sees a new completion line like `scrub repaired ... on ...` (if enabled).
-   * (Optional) Resilver start/end notifications can be enabled similarly.
-
-## Scrub notifications: “once at start, once at end”
-
-This is enforced by state tracking files inside `STATE_DIR`:
-
-* `${POOL}.last_activity` tracks last seen activity (`scrub`, `resilver`, `none`, etc.)
-* `${POOL}.last_scrub_id` stores the last scrub completion `scan:` line to prevent duplicates
-
-Because of this, you can run the script frequently and it will not spam you during an ongoing scrub.
-
-## Configuration reference
-
-All of these can go in `/etc/zpool-monitor.env`:
-
-* `POOL`
-  Pool name to check (required).
-
-* `LOGFILE`
-  Log path. Default: `/var/log/poolStatusCheck.log`
-
-* `STATE_DIR`
-  Directory to store state files. Default: `/var/lib/poolStatusCheck`
-
-* `COOLDOWN_SECONDS`
-  Minimum seconds between “unhealthy” alerts. Default: `3600`
-
-* `PO_TOKEN`, `PO_UK`
-  Pushover application token and user key.
-
-* `NOTIFY_SCRUB_START` / `NOTIFY_SCRUB_END`
-  `1` to enable scrub start/end notifications; `0` to disable.
-
-* `NOTIFY_RESILVER_START` / `NOTIFY_RESILVER_END`
-  Optional resilver notifications.
-
-* `PO_PRIORITY_ALARM`, `PO_PRIORITY_INFO`
-  Pushover priority values:
-
-  * `-2` no notification
-  * `-1` quiet
-  * `0` normal
-  * `1` high
-  * `2` emergency (requires retry/expire)
-
-* `PO_SOUND_ALARM`, `PO_SOUND_INFO`
-  Optional Pushover sound names (empty string = default).
-
-* `ENV_FILE`
-  Path to config file. You typically pass this from cron:
-  `ENV_FILE=/etc/zpool-monitor.env`
-
-## Troubleshooting
-
-### No Pushover messages
-
-* Confirm credentials in `/etc/zpool-monitor.env`
-* Confirm `curl` path: `/usr/bin/curl`
-* Run manually with `sudo` and check log output:
-
-  ```bash
-  sudo ENV_FILE=/etc/zpool-monitor.env /usr/local/sbin/zpool-monitor.sh
-  ```
-
-### Script runs in terminal but not from cron
-
-* Cron has a minimal environment; always pass `ENV_FILE=...`
-* Use absolute paths (the script already does)
-* Ensure cron user has permission to run `zpool status` (root recommended)
-
-### Too many alerts during an incident
-
-* Increase `COOLDOWN_SECONDS`
-* Make sure `STATE_DIR` is writable and persistent (so cooldown and “already notified” state can be stored)
-
-## Notes / extensions
-
-* Multiple pools: you can run multiple cron entries with different env files, e.g.:
-
-  * `/etc/zpool-monitor-poolA.env`
-  * `/etc/zpool-monitor-poolB.env`
-
-* Scrub paused behavior: the script treats `scrub paused` as distinct from `scrub in progress`. If you prefer “paused still counts as scrubbing” for start/end semantics, adjust the activity transition logic in the script.
-
-## Security
-
-* Protect `/etc/zpool-monitor.env` since it contains secrets:
-
-  ```bash
-  sudo chmod 600 /etc/zpool-monitor.env
-  ```
-* Keep `STATE_DIR` root-owned if running via root cron.
+   - Scrub / resilver activity and progress
+   - Healthy or unhealthy state
+4. Sends notifications:
+   - **Unhealthy pool** (rate-limited)
+   - **Scrub started** (once per scrub, optional)
+   - **Scrub finished** (once per scrub, optional)
+   - Optional resilver start/end notifications
 
 ---
 
-If you want, I can also add a `logrotate` stanza for `poolStatusCheck.log` so it doesn’t grow forever.
+## Scrub Notifications (Once at Start, Once at End)
 
+The script tracks state transitions using files in `STATE_DIR`:
+
+- `${POOL}.last_activity`  
+  Tracks last known activity (`scrub`, `resilver`, `none`, etc.)
+
+- `${POOL}.last_scrub_id`  
+  Stores the final `scan:` completion line (`scrub repaired ... on ...`) to prevent duplicate “scrub finished” alerts
+
+Because of this, the script can run every minute without spamming you.
+
+---
+
+## Configuration Reference
+
+All settings below can be defined in `/etc/zpool-monitor.env`.
+
+| Variable | Description |
+|--------|------------|
+| `POOL` | Name of the ZFS pool to monitor |
+| `LOGFILE` | Path to log file |
+| `STATE_DIR` | Directory for state tracking |
+| `COOLDOWN_SECONDS` | Minimum time between unhealthy alerts |
+| `PO_TOKEN` | Pushover application token |
+| `PO_UK` | Pushover user key |
+| `NOTIFY_SCRUB_START` | Notify when scrub starts (0/1) |
+| `NOTIFY_SCRUB_END` | Notify when scrub ends (0/1) |
+| `NOTIFY_RESILVER_START` | Notify when resilver starts (0/1) |
+| `NOTIFY_RESILVER_END` | Notify when resilver ends (0/1) |
+| `PO_PRIORITY_ALARM` | Priority for unhealthy alerts |
+| `PO_PRIORITY_INFO` | Priority for scrub/resilver alerts |
+| `PO_SOUND_ALARM` | Optional Pushover sound for alarms |
+| `PO_SOUND_INFO` | Optional Pushover sound for info alerts |
+
+---
+
+## Troubleshooting
+
+### No Pushover notifications
+- Verify `PO_TOKEN` and `PO_UK`
+- Ensure `curl` exists at `/usr/bin/curl`
+- Run manually and check logs
+
+### Works manually but not in cron
+- Cron has a minimal environment — always pass `ENV_FILE=...`
+- Ensure the script uses absolute paths
+- Run as `root` for ZFS permissions
+
+### Too many alerts
+- Increase `COOLDOWN_SECONDS`
+- Ensure `STATE_DIR` is writable and persistent
+
+---
+
+## Security Notes
+
+- Protect the environment file (contains secrets):
+
+```bash
+sudo chmod 600 /etc/zpool-monitor.env
 ```
-```
+
+- Keep the state directory root-owned if running from root cron
+
+---
+
+## Optional Enhancements
+
+- Add `logrotate` configuration for `poolStatusCheck.log`
+- Run multiple pools using multiple env files
+- Convert to a systemd timer instead of cron
+
+---
+
+This README is ready for direct upload to GitHub as `README.md`.
+
